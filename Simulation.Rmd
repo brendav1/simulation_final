@@ -1,0 +1,529 @@
+---
+title: "Monte Carlo Evaluation of Attrition Effects"
+author: "Brenda Valdes"
+date: "2025-05-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(broom)
+library(kableExtra)
+```
+>In large-scale educational datasets, missing outcome data—particularly in standardized assessments like the SBAC—is both common and consequential. When this missingness is not random, it can introduce bias and lead to incomplete or misleading understandings of student performance. This is especially problematic when structurally marginalized students—such as those from low-income households, with lower levels of parental education, or with intersecting marginalized identities—are disproportionately represented among those with missing data. In such scenarios, statistical models may be trained on samples that overrepresent higher-performing or more advantaged students, thereby skewing estimates and masking critical disparities.
+
+>Rather than treating missing data as inconsequential, we employed a simulation approach to examine how attrition may influence group comparisons and estimates of educational equity. Prior literature has highlighted the risks of non-random attrition and used statistical strategies such as simulation and model-based imputation to assess the robustness of findings. Building on this work, we generated a simulated complete dataset using imputed SBAC scores for students with missing outcomes. We then repeated the simulation 100 times through a Monte Carlo approach to assess variability and bias.
+
+>Findings revealed a notable discrepancy between models using only observed data and those using simulated complete data. Specifically, students from low socioeconomic backgrounds—as proxied by parental education—appeared to perform significantly worse in the observed data than in the simulated data. This suggests that attrition may have disproportionately obscured the outcomes of these students, leading to an underestimation of their academic potential. These results underscore the need for caution when interpreting patterns in incomplete datasets and highlight the importance of addressing informative missingness in justice-oriented educational research.
+
+```{r, warning=FALSE}
+# Load and select
+
+
+file_path <- "/Users/brendavaldes/Desktop/Gardner_Center/combined_el_master_data_2025RQ.xlsx"  # use relative path if possible
+df <- read_excel(file_path)
+
+df <- df %>%
+  mutate(
+    frpl_f = ifelse(frpl_f %in% c("1", 1, TRUE), 1,
+                    ifelse(frpl_f %in% c("0", 0, FALSE), 0, NA)),
+    disable_f = ifelse(disable_f %in% c("1", 1, TRUE), 1,
+                       ifelse(disable_f %in% c("0", 0, FALSE), 0, NA))
+  )
+
+
+ltel_selected <- df %>%
+  select(
+    distname, ssid, localstudentid, gender, hless_f, foster_f, birthcty, hlang,
+    parentedu, frpl_f, disabletype, disable_f,
+    starts_with("SS_SB1_"), starts_with("OverPL_EP21_"),
+    starts_with("grdlvl_")
+  )
+```
+
+
+```{r}
+# Pivot to long format
+ltel_long <- ltel_selected %>%
+  pivot_longer(
+    cols = matches("_(2018|2019|2021|2022|2023|2024)$"),
+    names_to = c(".value", "year"),
+    names_pattern = "(.*)_(2018|2019|2021|2022|2023|2024)"
+  )
+```
+
+
+```{r}
+# Keep just 2022 and 2023 (no score filtering yet)
+ltel_sub <- ltel_long %>%
+  filter(year %in% c("2019","2022", "2023"))
+
+ltel_sub_model <- ltel_long %>%
+  filter(year %in% c("2019","2022", "2023")) %>%
+  mutate(
+    SS_SB1 = ifelse(SS_SB1 < 100 | SS_SB1 > 3000, NA, SS_SB1)
+  ) %>%
+  filter(!is.na(SS_SB1)) %>%
+  drop_na(gender, parentedu, year) %>%   
+  mutate(
+    year = factor(year),
+    gender = factor(gender),
+    parentedu = factor(parentedu)
+  ) %>%
+  droplevels()
+ltel_sub_model <- ltel_sub_model %>%
+  mutate(
+    parentedu = relevel(parentedu, ref = "Not a High School Graduate")
+  )
+```
+
+
+```{r}
+#model_observed
+model <- lm(SS_SB1 ~ year + frpl_f + gender + parentedu, data = ltel_sub)
+summary(model)
+
+
+```
+
+```{r}
+#One drawback from my results or limination of my results is attritiion rates. Lets see how much attrition do i have?
+#lunch
+ltel_long %>%
+  mutate(missing_sbac = is.na(SS_SB1)) %>%
+  group_by(frpl_f) %>%
+  summarise(
+    n_total = n(),
+    n_missing = sum(missing_sbac),
+    attrition_rate = mean(missing_sbac)
+  )
+
+
+#parent edu
+ltel_long %>%
+  mutate(missing_sbac = is.na(SS_SB1)) %>%
+  group_by(parentedu) %>%
+  summarise(
+    n_total = n(),
+    n_missing = sum(missing_sbac),
+    attrition_rate = mean(missing_sbac)
+  ) %>%
+  arrange(desc(attrition_rate))
+
+#gender
+ltel_long %>%
+  mutate(missing_sbac = is.na(SS_SB1)) %>%
+  group_by(gender) %>%
+  summarise(
+    n_total = n(),
+    n_missing = sum(missing_sbac),
+    attrition_rate = mean(missing_sbac)
+  )
+
+
+```
+
+
+
+
+```{r}
+#simulation
+coefs <- coef(model) 
+
+set.seed(123)
+n <- 10000
+
+sim_data <- tibble(
+  year = sample(c("2019","2022", "2023"), n, replace = TRUE),
+  frpl_f = sample(c(1, 0), n, replace = TRUE, prob = c(0.7, 0.3)),
+  gender = sample(c("female", "male", "nonbinary"), n, replace = TRUE, prob = c(0.5, 0.48, 0.02)),
+  parentedu = sample(c(
+    "Not a High School Graduate", "High School Graduate", "Some College or Associate's Degree",
+    "College Graduate", "Graduate Degree or Higher", "Decline to State"
+  ), n, replace = TRUE, prob = c(0.2, 0.25, 0.2, 0.15, 0.1, 0.1))
+)
+
+
+sim_data <- sim_data %>%
+  mutate(
+    year = factor(year, levels = c("2019","2022", "2023")),
+    frpl_f = factor(frpl_f, levels = c(1, 0)),
+    gender = factor(gender),
+    parentedu = factor(parentedu, levels = levels(ltel_sub_model$parentedu))  # match your real model
+  )
+
+
+X <- model.matrix(~ year + frpl_f + gender + parentedu, data = sim_data)
+sim_data$SBAC_pred <- X %*% coefs
+
+# Add realistic residual noise based on your model’s RMSE
+resid_sd <- summary(model)$sigma
+sim_data$SBAC_sim <- sim_data$SBAC_pred + rnorm(n, mean = 0, sd = resid_sd)
+```
+
+
+```{r}
+sim_data <- sim_data %>%
+  mutate(
+    attrition_prob = plogis(-0.75 + 
+                            0.8 * (frpl_f == 1) +
+                            0.6 * (parentedu == "Not a High School Graduate") +
+                            0.4 * (gender == "male")),
+    dropped_out = rbinom(n, 1, attrition_prob),
+    SBAC_observed = ifelse(dropped_out == 1, NA, SBAC_sim)
+  )
+
+
+
+mean(sim_data$SBAC_sim)         # true average (everyone)
+mean(sim_data$SBAC_observed, na.rm = TRUE)  # observed average (after attrition)
+
+mean(sim_data$SBAC_observed, na.rm = TRUE) - mean(sim_data$SBAC_sim)
+
+
+sim_data %>%
+  mutate(attrited = is.na(SBAC_observed)) %>%
+  group_by(frpl_f, gender, parentedu) %>%
+  summarise(
+    true_mean = mean(SBAC_sim),
+    observed_mean = mean(SBAC_observed, na.rm = TRUE),
+    bias = observed_mean - true_mean,
+    dropout_rate = mean(attrited),
+    n = n()
+  ) %>%
+  arrange(desc(abs(bias)))
+
+
+
+#plot
+
+# Create subgroup summaries
+bias_summary <- sim_data %>%
+  mutate(attrited = is.na(SBAC_observed)) %>%
+  group_by(frpl_f, gender, parentedu) %>%
+  summarise(
+    true_mean = mean(SBAC_sim),
+    observed_mean = mean(SBAC_observed, na.rm = TRUE),
+    bias = observed_mean - true_mean,
+    dropout_rate = mean(attrited),
+    n = n(),
+    .groups = "drop"
+  )
+
+# Plot bias by subgroup
+bias_by_parentedu <- sim_data %>%
+  mutate(attrited = is.na(SBAC_observed)) %>%
+  group_by(parentedu) %>%
+  summarise(
+    true_mean = mean(SBAC_sim),
+    observed_mean = mean(SBAC_observed, na.rm = TRUE),
+    bias = observed_mean - true_mean,
+    dropout_rate = mean(attrited),
+    n = n()
+  )
+
+# Plot
+ggplot(bias_by_parentedu, aes(x = reorder(parentedu, bias), y = bias)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Bias in Observed SBAC Scores by Parent Education",
+    x = "Parent Education",
+    y = "Observed Mean – True Mean (Bias)"
+  ) +
+  theme_minimal()
+
+
+#############################
+```
+
+
+```{r}
+
+sim_data %>%
+  mutate(attrited = is.na(SBAC_observed)) %>%
+  group_by(frpl_f, gender, parentedu) %>%
+  summarise(
+    true_mean = mean(SBAC_sim),
+    observed_mean = mean(SBAC_observed, na.rm = TRUE),
+    bias = observed_mean - true_mean,
+    dropout_rate = mean(attrited),
+    n = n()
+  ) %>%
+  arrange(desc(abs(bias)))
+
+
+
+#plot
+
+# Create subgroup summaries
+bias_summary <- sim_data %>%
+  mutate(attrited = is.na(SBAC_observed)) %>%
+  group_by(frpl_f, gender, parentedu) %>%
+  summarise(
+    true_mean = mean(SBAC_sim),
+    observed_mean = mean(SBAC_observed, na.rm = TRUE),
+    bias = observed_mean - true_mean,
+    dropout_rate = mean(attrited),
+    n = n(),
+    .groups = "drop"
+  )
+
+# Plot bias by subgroup
+bias_by_parentedu <- sim_data %>%
+  mutate(attrited = is.na(SBAC_observed)) %>%
+  group_by(parentedu) %>%
+  summarise(
+    true_mean = mean(SBAC_sim),
+    observed_mean = mean(SBAC_observed, na.rm = TRUE),
+    bias = observed_mean - true_mean,
+    dropout_rate = mean(attrited),
+    n = n()
+  )
+
+# Plot
+ggplot(bias_by_parentedu, aes(x = reorder(parentedu, bias), y = bias)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Bias in Observed SBAC Scores by Parent Education",
+    x = "Parent Education",
+    y = "Observed Mean – True Mean (Bias)"
+  ) +
+  theme_minimal()
+```
+>Observed mean- true mean
+Figure X shows the bias in observed SBAC scores across parent education subgroups under simulated attrition. All subgroups exhibit negative bias, indicating that observed scores tend to underestimate the true population means. The bias is most pronounced for students whose parents have “Some College or Associate’s Degree” or are “College Graduates,” suggesting that students from these groups who attrit may have higher-than-average academic performance. Conversely, the group with “Graduate Degree or Higher” shows little to no bias, possibly due to lower attrition rates or more homogeneous performance.
+
+```{r}
+dropout_by_parentedu <- sim_data %>%
+  mutate(attrited = is.na(SBAC_observed)) %>%
+  group_by(parentedu) %>%
+  summarise(
+    dropout_rate = mean(attrited),
+    n = n()
+  ) %>%
+  arrange(desc(dropout_rate))
+
+# Plot
+ggplot(dropout_by_parentedu, aes(x = reorder(parentedu, dropout_rate), y = dropout_rate)) +
+  geom_col(fill = "darkred") +
+  coord_flip() +
+  labs(
+    title = "Dropout Rate by Parent Education",
+    x = "Parent Education",
+    y = "Proportion Dropped Out"
+  ) +
+  theme_minimal()
+```
+>Dropout rates
+Our simulation suggests that students whose parents did not graduate high school are disproportionately likely to be excluded from SBAC data due to attrition, with a dropout rate over 25%. This pattern introduces bias into observed outcomes, systematically underrepresenting the experiences and performance of the most structurally marginalized groups
+
+```{r}
+#############
+ltel_impute <- ltel_sub %>%
+  mutate(
+    year = factor(year),
+    gender = factor(gender),
+    parentedu = factor(parentedu),
+    frpl_f = factor(frpl_f, levels = c(1, 0))
+  )
+
+
+X <- model.matrix(~ year + frpl_f + gender + parentedu, data = ltel_impute)
+predicted <- X %*% coef(model)
+resid_sd <- summary(model)$sigma
+```
+
+
+```{r}
+set.seed(123)
+ltel_impute <- ltel_impute %>%
+  mutate(
+    SBAC_filled = as.vector(predicted) + rnorm(n(), mean = 0, sd = resid_sd),
+    SBAC_final = ifelse(is.na(SS_SB1), SBAC_filled, SS_SB1)
+  )
+# Determine which are missing
+missing_idx <- which(is.na(ltel_impute$SS_SB1))
+
+# Create SBAC_filled, keeping observed scores and simulating only missing
+ltel_impute$SBAC_filled <- ltel_impute$SS_SB1
+ltel_impute$SBAC_filled[missing_idx] <- as.vector(predicted)[missing_idx] +
+                                        rnorm(length(missing_idx), 0, resid_sd)
+
+# SBAC_final is now your complete dataset (same as SBAC_filled)
+ltel_impute$SBAC_final <- ltel_impute$SBAC_filled
+
+# Fit the model on the completed data
+model_complete <- lm(SBAC_final ~ year + frpl_f + gender + parentedu, data = ltel_impute)
+
+# Compare:
+summary(model)           # observed only
+summary(model_complete)  # simulated complete
+
+```
+>Comparing models fit to observed SBAC data versus those incorporating simulated values for missing outcomes reveals substantial differences in the magnitude of group effects. In the observed-only model, the estimated FRPL effect was −70 points, while the simulated model, which accounts for attrition, reduces this gap to −17. Similar compression is seen in parent education and gender gaps.
+These results suggest that attrition likely biased the observed estimates, exaggerating disparities by disproportionately excluding students from marginalized groups who may have performed better than the remaining sample suggests. By simulating complete data, we recover a more moderated and potentially more accurate view of student performance patterns.
+
+```{r}
+#visual
+
+
+
+# Tidy both models
+model_obs_tidy <- tidy(model) %>%
+  mutate(model_type = "Observed Only")
+
+model_sim_tidy <- tidy(model_complete) %>%
+  mutate(model_type = "Simulated Complete")
+
+# Combine them
+combined_models <- bind_rows(model_obs_tidy, model_sim_tidy) %>%
+  filter(term != "(Intercept)")  # remove intercept for cleaner plot
+
+# Clean labels for terms
+combined_models$term <- recode(combined_models$term,
+  "year2023" = "Year: 2023",
+  "frpl_f0" = "Not FRPL",
+  "frpl_f" = "FRPL (vs. not)",
+  "gendermale" = "Gender: Male",
+  "gendernonbinary" = "Gender: Nonbinary",
+  "parenteduDecline to State" = "Parent Edu: Decline to State",
+  "parenteduGraduate Degree or Higher" = "Parent Edu: Grad Degree+",
+  "parenteduHigh School Graduate" = "Parent Edu: HS Graduate",
+  "parenteduNot a High School Graduate" = "Parent Edu: No HS (ref)",
+  "parenteduSome College or Associate's Degree" = "Parent Edu: Some College"
+)
+
+# Plot
+ggplot(combined_models, aes(x = estimate, y = reorder(term, estimate), color = model_type)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbarh(aes(xmin = estimate - std.error, xmax = estimate + std.error),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  labs(
+    title = "Comparison of Coefficients: Observed vs. Simulated SBAC Models",
+    x = "Coefficient Estimate",
+    y = "Predictor",
+    color = "Model Type"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+```{r}
+#Montecarlo baby 
+
+
+library(broom)
+
+n_sim <- 100
+results <- vector("list", n_sim)
+
+set.seed(123)
+
+for (i in 1:n_sim) {
+  # 1. Predict SBAC with random error
+  X <- model.matrix(~ year + frpl_f + gender + parentedu, data = ltel_impute)
+  predicted <- X %*% coef(model)
+  resid_sd <- summary(model)$sigma
+  
+  # 2. Simulate missing SBACs
+  ltel_impute$SBAC_final_sim <- ifelse(
+    is.na(ltel_impute$SS_SB1),
+    as.vector(predicted) + rnorm(nrow(ltel_impute), 0, resid_sd),
+    ltel_impute$SS_SB1
+  )
+  
+  # 3. Fit model on simulated complete data
+  sim_mod <- lm(SBAC_final_sim ~ year + frpl_f + gender + parentedu, data = ltel_impute)
+  results[[i]] <- tidy(sim_mod) %>% mutate(sim = i)
+}
+
+# Combine all results
+sim_results <- bind_rows(results)
+
+
+
+sim_summary <- sim_results %>%
+  filter(str_detect(term, "parentedu")) %>%
+  group_by(term) %>%
+  summarise(
+    mean_est = mean(estimate),
+    sd_est = sd(estimate),
+    lower_95 = quantile(estimate, 0.025),
+    upper_95 = quantile(estimate, 0.975),
+    .groups = "drop"
+  )
+
+sim_results %>%
+  filter(term == "parenteduHigh School Graduate") %>%
+  ggplot(aes(x = estimate)) +
+  geom_histogram(bins = 30, fill = "steelblue") +
+  geom_vline(xintercept = coef(model)["parenteduHigh School Graduate"], color = "red", linetype = "dashed") +
+  labs(
+    title = "Monte Carlo Distribution of Coefficient: HS Grad vs. No HS",
+    x = "Coefficient Estimate",
+    y = "Frequency"
+  )
+
+names(coef(model))
+
+```
+>The simulated coefficient estimates for HS Grad are tightly clustered around −45 to −50, while the observed-only estimate is an extreme outlier at −88.
+This suggests that data missingness due to attrition inflated the apparent disadvantage for students whose parents graduated high school, likely because those missing were disproportionately higher-performing in that subgroup.
+
+```{r}
+
+library(dplyr)
+
+# Summarize by term
+sim_summary <- sim_results %>%
+  filter(str_detect(term, "parentedu")) %>%
+  group_by(term) %>%
+  summarise(
+    mean_est = mean(estimate),
+    sd_est = sd(estimate),
+    lower_95 = quantile(estimate, 0.025),
+    upper_95 = quantile(estimate, 0.975),
+    .groups = "drop"
+  )
+
+
+
+sim_results %>%
+  filter(str_detect(term, "parentedu")) %>%
+  ggplot(aes(x = estimate)) +
+  geom_histogram(bins = 30, fill = "steelblue") +
+  geom_vline(data = sim_summary, aes(xintercept = mean_est), color = "black", linetype = "dashed") +
+  facet_wrap(~ term, scales = "free_x") +
+  labs(
+    title = "Monte Carlo Distributions of Parent Education Coefficients",
+    x = "Coefficient Estimate",
+    y = "Frequency"
+  ) +
+  theme_minimal(base_size = 12)
+
+
+
+sim_summary %>%
+  mutate(across(where(is.numeric), round, 2)) %>%
+  kable(caption = "Simulation Summary: Parent Education Coefficients",
+        col.names = c("Term", "Mean", "SD", "2.5%", "97.5%"))
+
+
+```
+
+>Compared to a model using only observed data, the model using simulated complete SBAC scores shows significantly smaller socioeconomic and parent education effects. This suggests that attrition disproportionately affected high-performing students from marginalized groups, leading to an overestimation of disadvantage in the observed dataset
+
+
+>Table X presents the mean and 95% Monte Carlo simulation intervals for SBAC score differences by parent education group, relative to students whose parents did not graduate high school. The simulation suggests that while meaningful differences remain, the magnitude of these effects is more moderate than what observed-only models indicate. For example, the estimated disadvantage for “High School Graduate” parents is −52.75 points, compared to −88 in the observed model. This highlights how missing data may inflate group differences and why simulation is critical to recovering more accurate, representative estimates.
+
+>Figure X. Monte Carlo distributions of parent education coefficient estimates across 100 simulations. Each panel shows the distribution of estimated effects compared to the reference group (“Not a High School Graduate”). Dashed lines represent the average simulated coefficient. Across all categories, simulated estimates are more moderate and tightly distributed compared to observed-only models, suggesting that attrition may exaggerate differences in observed data.
+
+
+
